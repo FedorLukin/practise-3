@@ -42,15 +42,27 @@ def external_natural_merge_sort(
         output, (str, bytes, os.PathLike)
     ):
         if len(output) != len(sources):
-            raise ValueError("Число выходных файлов не совпадает с числом входных.")
+            raise ValueError(
+                "Число выходных файлов не совпадает с числом входных."
+            )
         targets = [
-            Path(item) if item else source for source, item in zip(sources, output)
+            Path(item) if item else source
+            for source, item in zip(sources, output)
         ]
         for source, target in zip(sources, targets):
-            _sort([source], target, reverse, key, type_data, file_format == ".csv")
+            _sort(
+                [source],
+                target,
+                reverse,
+                key,
+                type_data,
+                file_format == ".csv",
+            )
         return
 
-    _sort(sources, Path(output), reverse, key, type_data, file_format == ".csv")
+    _sort(
+        sources, Path(output), reverse, key, type_data, file_format == ".csv"
+    )
 
 
 def my_sort(
@@ -115,7 +127,9 @@ def _sort(
     target = target.expanduser().absolute()
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=target.parent) as folder:
-        first, second, merged = [Path(folder) / name for name in ("a", "b", "merged")]
+        first, second, merged = [
+            Path(folder) / name for name in ("a", "b", "merged")
+        ]
         count = _split(records, first, second, csv_file, column, kind, reverse)
         result = first
         while count > 1:
@@ -124,7 +138,13 @@ def _sort(
             result = merged
             if count > 1:
                 count = _split(
-                    _read_tape(merged), first, second, csv_file, column, kind, reverse
+                    _read_tape(merged),
+                    first,
+                    second,
+                    csv_file,
+                    column,
+                    kind,
+                    reverse,
                 )
         staged = Path(folder) / "result"
         _write_result(result, staged, csv_file, header)
@@ -145,7 +165,11 @@ def _header(sources: Sequence[Path]) -> Record | None:
 
 def _column(header: Record, key: str | int | None) -> int:
     try:
-        index = header.index(key) if isinstance(key, str) and key else int(key or 0)
+        index = (
+            header.index(key)
+            if isinstance(key, str) and key
+            else int(key or 0)
+        )
     except ValueError as error:
         raise ValueError(f"Столбец {key!r} не найден.") from error
     if not 0 <= index < len(header):
@@ -156,7 +180,6 @@ def _column(header: Record, key: str | int | None) -> int:
 def _records(
     sources: Sequence[Path],
     csv_file: bool,
-    header: Record | None,
     column: int | None,
 ) -> Iterator[Record]:
     for path in sources:
@@ -170,7 +193,9 @@ def _records(
             for row in reader:
                 if row:
                     if column is not None and column >= len(row):
-                        raise ValueError("В строке отсутствует столбец сортировки.")
+                        raise ValueError(
+                            "В строке отсутствует столбец сортировки."
+                        )
                     yield row
 
 
@@ -186,7 +211,9 @@ def _key(value: str, kind: str):
     try:
         return (0, int(value) if kind == "i" else float(value))
     except ValueError as error:
-        raise ValueError(f"Невозможно преобразовать значение {value!r}.") from error
+        raise ValueError(
+            f"Невозможно преобразовать значение {value!r}."
+        ) from error
 
 
 def _infer(
@@ -275,6 +302,7 @@ class _RunReader:
         self.pending = None
 
     def next_run(self):
+        """Возвращает следующую серию записей."""
         first = self.pending
         self.pending = None
         while first is None or first == []:
@@ -283,13 +311,19 @@ class _RunReader:
                 return None
 
         def generate():
-            previous = _key(_value(first, self.csv_file, self.column), self.kind)
+            previous = _key(
+                _value(first, self.csv_file, self.column), self.kind
+            )
             yield first
             for record in self.records:
                 if not record:
                     break
-                current = _key(_value(record, self.csv_file, self.column), self.kind)
-                unordered = current > previous if self.reverse else current < previous
+                current = _key(
+                    _value(record, self.csv_file, self.column), self.kind
+                )
+                unordered = (
+                    current > previous if self.reverse else current < previous
+                )
                 if unordered:
                     self.pending = record
                     return
@@ -309,7 +343,8 @@ def _merge(
     reverse: bool,
 ) -> None:
     readers = [
-        _RunReader(path, csv_file, column, kind, reverse) for path in (first, second)
+        _RunReader(path, csv_file, column, kind, reverse)
+        for path in (first, second)
     ]
     with target.open("w", encoding="utf-8") as output:
         while True:
@@ -328,7 +363,9 @@ def _merge(
                     left_key = _key(_value(a, csv_file, column), kind)
                     right_key = _key(_value(b, csv_file, column), kind)
                     take_left = (
-                        left_key >= right_key if reverse else left_key <= right_key
+                        left_key >= right_key
+                        if reverse
+                        else left_key <= right_key
                     )
                 if take_left:
                     _dump(output, a)
@@ -349,7 +386,9 @@ def _count_runs(
             previous = None
             continue
         current = _key(_value(record, csv_file, column), kind)
-        if previous is None or (current > previous if reverse else current < previous):
+        if previous is None or (
+            current > previous if reverse else current < previous
+        ):
             count += 1
         previous = current
     return count
@@ -377,7 +416,9 @@ def _write_result(
 
 def main() -> None:
     """Запускает сортировку из командной строки."""
-    parser = argparse.ArgumentParser(description="Внешняя сортировка TXT и CSV.")
+    parser = argparse.ArgumentParser(
+        description="Внешняя сортировка TXT и CSV."
+    )
     parser.add_argument("src", nargs="+")
     parser.add_argument("-o", "--output", default="")
     parser.add_argument("-r", "--reverse", action="store_true")
