@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 Record = list[str]
 
@@ -15,7 +15,7 @@ def external_natural_merge_sort(
     src: str | os.PathLike | Sequence[str | os.PathLike],
     output: str | os.PathLike | Sequence[str | os.PathLike] = "",
     reverse: bool = False,
-    key: str | int | None = "",
+    key: str | int | Callable[[str], object] | None = "",
     type_data: str = "i",
 ) -> None:
     """Сортирует один или несколько файлов."""
@@ -69,7 +69,7 @@ def my_sort(
     src: str | os.PathLike | Sequence[str | os.PathLike],
     output: str | os.PathLike | Sequence[str | os.PathLike] | None = None,
     reverse: bool = False,
-    key: str | int | None = None,
+    key: str | int | Callable[[str], object] | None = None,
     nflows: int = 1,
     bsize: int | None = None,
 ) -> None:
@@ -114,15 +114,20 @@ def _sort(
     sources: Sequence[Path],
     target: Path,
     reverse: bool,
-    key: str | int | None,
+    key: str | int | Callable[[str], object] | None,
     kind: str,
     csv_file: bool,
 ) -> None:
     header = _header(sources) if csv_file else None
-    column = _column(header, key) if header is not None else None
-    records = _records(sources, csv_file, header, column)
+    if csv_file and (key is None or key == ""):
+        raise ValueError("Для сортировки CSV необходимо указать столбец.")
+    if csv_file and header is None:
+        raise ValueError("CSV-файл должен содержать строку заголовка.")
+    column = _column(header, key) if csv_file else None
+    key_func = key if callable(key) and not csv_file else None
+    records = _records(sources, csv_file, column)
     if kind == "auto":
-        kind = _infer(sources, csv_file, header, column)
+        kind = _infer(sources, csv_file, column, key_func)
 
     target = target.expanduser().absolute()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -130,11 +135,18 @@ def _sort(
         first, second, merged = [
             Path(folder) / name for name in ("a", "b", "merged")
         ]
-        count = _split(records, first, second, csv_file, column, kind, reverse)
+        count = _split(
+            records, first, second, csv_file, column, kind, reverse, key_func
+        )
         result = first
         while count > 1:
-            _merge(first, second, merged, csv_file, column, kind, reverse)
-            count = _count_runs(merged, csv_file, column, kind, reverse)
+            _merge(
+                first, second, merged, csv_file, column, kind, reverse,
+                key_func
+            )
+            count = _count_runs(
+                merged, csv_file, column, kind, reverse, key_func
+            )
             result = merged
             if count > 1:
                 count = _split(
@@ -145,6 +157,7 @@ def _sort(
                     column,
                     kind,
                     reverse,
+                    key_func,
                 )
         staged = Path(folder) / "result"
         _write_result(result, staged, csv_file, header)
@@ -164,16 +177,22 @@ def _header(sources: Sequence[Path]) -> Record | None:
 
 
 def _column(header: Record, key: str | int | None) -> int:
-    try:
-        index = (
-            header.index(key)
-            if isinstance(key, str) and key
-            else int(key or 0)
-        )
-    except ValueError as error:
-        raise ValueError(f"Столбец {key!r} не найден.") from error
+    if isinstance(key, str) and key:
+        try:
+            index = header.index(key)
+        except ValueError:
+            try:
+                index = int(key)
+            except ValueError as error:
+                raise ValueError(
+                    f"Столбец {key!r} не найден."
+                ) from error
+    else:
+        index = int(key or 0)
+
     if not 0 <= index < len(header):
         raise ValueError("Индекс столбца вне диапазона.")
+
     return index
 
 
@@ -182,6 +201,7 @@ def _records(
     csv_file: bool,
     column: int | None,
 ) -> Iterator[Record]:
+    """Последовательно читает записи исходных файлов."""
     for path in sources:
         with path.open(encoding="utf-8-sig", newline="") as file:
             if not csv_file:
@@ -199,8 +219,15 @@ def _records(
                     yield row
 
 
-def _value(record: Record, csv_file: bool, column: int | None) -> str:
-    return record[column or 0] if csv_file else record[0]
+def _value(
+    record: Record,
+    csv_file: bool,
+    column: int | None,
+    key_func: Callable[[str], object] | None = None,
+) -> object:
+    """Возвращает значение, используемое для сравнения записи."""
+    value = record[column or 0] if csv_file else record[0]
+    return key_func(value) if key_func is not None else value
 
 
 def _key(value: str, kind: str):
@@ -219,15 +246,17 @@ def _key(value: str, kind: str):
 def _infer(
     sources: Sequence[Path],
     csv_file: bool,
-    header: Record | None,
     column: int | None,
+    key_func: Callable[[str], object] | None = None,
 ) -> str:
+    """Определяет тип значений без загрузки файла целиком."""
     integer = floating = True
     found = False
-    for row in _records(sources, csv_file, header, column):
-        value = _value(row, csv_file, column)
-        if not value:
+    for row in _records(sources, csv_file, column):
+        value = _value(row, csv_file, column, key_func)
+        if value == "" or value is None:
             continue
+        value = str(value)
         found = True
         try:
             int(value)
@@ -263,7 +292,9 @@ def _split(
     column: int | None,
     kind: str,
     reverse: bool,
+    key_func: Callable[[str], object] | None = None,
 ) -> int:
+    """Распределяет естественные серии по двум временным файлам."""
     count = 0
     previous = None
     active = 0
@@ -274,7 +305,7 @@ def _split(
         for record in records:
             if not record:
                 continue
-            current = _key(_value(record, csv_file, column), kind)
+            current = _key(_value(record, csv_file, column, key_func), kind)
             if previous is not None and (
                 current > previous if reverse else current < previous
             ):
@@ -293,12 +324,13 @@ def _split(
 class _RunReader:
     """Читает серии из временного файла."""
 
-    def __init__(self, path, csv_file, column, kind, reverse):
+    def __init__(self, path, csv_file, column, kind, reverse, key_func=None):
         self.records = iter(_read_tape(path))
         self.csv_file = csv_file
         self.column = column
         self.kind = kind
         self.reverse = reverse
+        self.key_func = key_func
         self.pending = None
 
     def next_run(self):
@@ -312,14 +344,16 @@ class _RunReader:
 
         def generate():
             previous = _key(
-                _value(first, self.csv_file, self.column), self.kind
+                _value(first, self.csv_file, self.column, self.key_func),
+                self.kind,
             )
             yield first
             for record in self.records:
                 if not record:
                     break
                 current = _key(
-                    _value(record, self.csv_file, self.column), self.kind
+                    _value(record, self.csv_file, self.column, self.key_func),
+                    self.kind,
                 )
                 unordered = (
                     current > previous if self.reverse else current < previous
@@ -341,9 +375,11 @@ def _merge(
     column: int | None,
     kind: str,
     reverse: bool,
+    key_func: Callable[[str], object] | None = None,
 ) -> None:
+    """Сливает попарно соответствующие естественные серии."""
     readers = [
-        _RunReader(path, csv_file, column, kind, reverse)
+        _RunReader(path, csv_file, column, kind, reverse, key_func)
         for path in (first, second)
     ]
     with target.open("w", encoding="utf-8") as output:
@@ -360,8 +396,12 @@ def _merge(
                 elif a is None:
                     take_left = False
                 else:
-                    left_key = _key(_value(a, csv_file, column), kind)
-                    right_key = _key(_value(b, csv_file, column), kind)
+                    left_key = _key(
+                        _value(a, csv_file, column, key_func), kind
+                    )
+                    right_key = _key(
+                        _value(b, csv_file, column, key_func), kind
+                    )
                     take_left = (
                         left_key >= right_key
                         if reverse
@@ -377,15 +417,21 @@ def _merge(
 
 
 def _count_runs(
-    path: Path, csv_file: bool, column: int | None, kind: str, reverse: bool
+    path: Path,
+    csv_file: bool,
+    column: int | None,
+    kind: str,
+    reverse: bool,
+    key_func: Callable[[str], object] | None = None,
 ) -> int:
+    """Подсчитывает естественные серии во временном файле."""
     count = 0
     previous = None
     for record in _read_tape(path):
         if not record:
             previous = None
             continue
-        current = _key(_value(record, csv_file, column), kind)
+        current = _key(_value(record, csv_file, column, key_func), kind)
         if previous is None or (
             current > previous if reverse else current < previous
         ):
